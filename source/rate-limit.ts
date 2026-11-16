@@ -29,7 +29,11 @@ import type {
 	ValueDeterminingMiddleware,
 } from './types.js'
 import { omitUndefinedProperties } from './utils.js'
-import { getValidations, type Validations } from './validations.js'
+import {
+	getValidations,
+	underlyingStoreSymbol,
+	type Validations,
+} from './validations.js'
 
 /**
  * Type guard to check if a store is legacy store.
@@ -61,6 +65,30 @@ const promisifyStore = (passedStore: LegacyStore | Store): Store => {
 
 	// A promisified version of the store
 	class PromisifiedStore implements Store {
+		/**
+		 * Read-through getters so validation checks that inspect store metadata
+		 * (`singleCount` uses `localKeys` and `prefix`) see the values of the
+		 * legacy store this adapter wraps, rather than a stale copy.
+		 */
+		get localKeys(): boolean | undefined {
+			return (legacyStore as Partial<Store>).localKeys
+		}
+
+		get prefix(): string | undefined {
+			return (legacyStore as Partial<Store>).prefix
+		}
+
+		constructor() {
+			// Expose the legacy store this adapter delegates to, so identity-based
+			// checks (such as `unsharedStore`) see the storage backend rather than
+			// this per-limiter wrapper. Non-enumerable to keep it out of logs,
+			// `Object.entries()`, and anything that walks store properties.
+			Object.defineProperty(this, underlyingStoreSymbol, {
+				value: legacyStore,
+				enumerable: false,
+			})
+		}
+
 		async increment(key: string): Promise<ClientRateLimitInfo> {
 			return new Promise((resolve, reject) => {
 				legacyStore.incr(

@@ -45,9 +45,50 @@ class ValidationError extends Error {
 class ChangeWarning extends ValidationError {}
 
 /**
- * List of store instances that have been used with any express-rate-limit instance
+ * Symbol used by store adapters to expose the instance they delegate to.
+ *
+ * Some stores (notably legacy callback-style stores using `incr`) are wrapped in
+ * an adapter before being handed to the middleware. The adapter object is
+ * created per limiter, so it cannot be used to tell whether the *storage* behind
+ * it is shared. Adapters therefore record their underlying instance under this
+ * non-enumerable symbol, which allows validations such as `unsharedStore` to
+ * compare storage identities rather than adapter identities.
+ *
+ * Store adapters should set this property with `Object.defineProperty()` (or
+ * otherwise make it non-enumerable) so it stays invisible to users, logs, and
+ * `Object.entries()`.
+ *
+ * @private
  */
-const usedStores = new Set<Store>()
+export const underlyingStoreSymbol = Symbol(
+	'express-rate-limit-underlying-store',
+)
+
+/**
+ * Resolves the instance that actually holds the hit counts for a store.
+ *
+ * For plain stores this is the store itself. For stores wrapped in an adapter,
+ * it is the instance exposed via {@link underlyingStoreSymbol}, so the check
+ * sees through the wrapper layer.
+ *
+ * @param store {Store} - The store (or adapter) passed to the middleware.
+ *
+ * @returns {object} - The underlying storage instance.
+ *
+ * @private
+ */
+const resolveStoreIdentity = (store: Store): object =>
+	(store as any)[underlyingStoreSymbol] ?? store
+
+/**
+ * List of underlying store instances that have been used with any
+ * express-rate-limit instance.
+ *
+ * Note that this holds the underlying instance, not the adapter that may wrap
+ * it, so a legacy store shared between limiters is detected just like a modern
+ * one.
+ */
+const usedStores = new Set<object>()
 
 /**
  * Maps the key used in a store for a certain request, and ensures that the
@@ -174,20 +215,26 @@ const validations = {
 	},
 
 	/**
-	 * Ensures a single store instance is not used with multiple express-rate-limit instances
+	 * Ensures a single store instance is not used with multiple express-rate-limit instances.
+	 *
+	 * The check runs on the store's underlying identity (see
+	 * {@link resolveStoreIdentity}), not on the object handed to the middleware,
+	 * so adapters created per limiter cannot hide a shared storage backend.
 	 */
 	unsharedStore(store: Store) {
-		if (usedStores.has(store)) {
-			const maybeUniquePrefix = store?.localKeys
+		const underlyingStore = resolveStoreIdentity(store) as Store
+
+		if (usedStores.has(underlyingStore)) {
+			const maybeUniquePrefix = underlyingStore?.localKeys
 				? ''
 				: ' (with a unique prefix)'
 			throw new ValidationError(
 				'ERR_ERL_STORE_REUSE',
-				`A Store instance must not be shared across multiple rate limiters. Create a new instance of ${store.constructor.name}${maybeUniquePrefix} for each limiter instead.`,
+				`A Store instance must not be shared across multiple rate limiters. Create a new instance of ${underlyingStore.constructor.name}${maybeUniquePrefix} for each limiter instead.`,
 			)
 		}
 
-		usedStores.add(store)
+		usedStores.add(underlyingStore)
 	},
 
 	/**

@@ -6,7 +6,11 @@ import express from 'express'
 import supertest from 'supertest'
 import { ipKeyGenerator, MemoryStore } from '../../source/index.js'
 import type { Logger, Options, Store } from '../../source/types'
-import { getValidations, type Validations } from '../../source/validations.js'
+import {
+	getValidations,
+	underlyingStoreSymbol,
+	type Validations,
+} from '../../source/validations.js'
 
 describe('validations tests', () => {
 	let validations: Validations
@@ -187,6 +191,69 @@ describe('validations tests', () => {
 
 			validations.unsharedStore(store1 as Store)
 			validations2.unsharedStore(store2 as Store)
+			expect(logger.error).not.toHaveBeenCalled()
+		})
+
+		// A store adapter (such as the one built for legacy callback stores) is
+		// created per limiter. Sharing the adapter's *underlying* store must be
+		// detected even though the adapter objects themselves are distinct.
+		class StoreAdapter {
+			constructor(readonly underlying: object) {
+				Object.defineProperty(this, underlyingStoreSymbol, {
+					value: underlying,
+					enumerable: false,
+				})
+			}
+		}
+
+		it('should log an error if separate adapters wrap the same underlying store', () => {
+			const underlyingStore = { localKeys: true }
+
+			validations.unsharedStore(
+				new StoreAdapter(underlyingStore) as unknown as Store,
+			)
+			expect(logger.error).not.toHaveBeenCalled()
+			validations2.unsharedStore(
+				new StoreAdapter(underlyingStore) as unknown as Store,
+			)
+			expect(logger.error).toHaveBeenCalledWith(
+				expect.objectContaining({
+					code: 'ERR_ERL_STORE_REUSE',
+				}),
+			)
+		})
+
+		it('should not log an error if separate adapters wrap distinct underlying stores', () => {
+			validations.unsharedStore(
+				new StoreAdapter({ localKeys: true }) as unknown as Store,
+			)
+			validations2.unsharedStore(
+				new StoreAdapter({ localKeys: true }) as unknown as Store,
+			)
+			expect(logger.error).not.toHaveBeenCalled()
+		})
+
+		it('should log an error for an adapter wrapping the same store without localKeys', () => {
+			const underlyingStore = { localKeys: false }
+
+			validations.unsharedStore(
+				new StoreAdapter(underlyingStore) as unknown as Store,
+			)
+			validations2.unsharedStore(
+				new StoreAdapter(underlyingStore) as unknown as Store,
+			)
+			expect(logger.error).toHaveBeenCalledWith(
+				expect.objectContaining({
+					code: 'ERR_ERL_STORE_REUSE',
+					message: expect.stringContaining('unique prefix'),
+				}),
+			)
+		})
+
+		it('should not report reuse for a single store used by a single limiter', () => {
+			const store = { localKeys: true }
+
+			validations.unsharedStore(store as Store)
 			expect(logger.error).not.toHaveBeenCalled()
 		})
 	})

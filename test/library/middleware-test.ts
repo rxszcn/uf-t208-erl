@@ -188,6 +188,67 @@ describe('middleware test', () => {
 		expect(store.initWasCalled).toEqual(true)
 	})
 
+	describe('store reuse validation', () => {
+		let logger: Logger
+
+		beforeEach(() => {
+			logger = {
+				error: jest.fn(),
+				warn: jest.fn(),
+			}
+		})
+
+		it.each([
+			['modern', () => new MockStore()],
+			['legacy', () => new MockLegacyStore()],
+			['compat', () => new MockBackwardCompatibleStore()],
+		])('should log an error when the same %s store is shared across two limiters', (name, createStore) => {
+			const store = createStore()
+
+			rateLimit({ store })
+			rateLimit({ store, logger })
+
+			expect(logger.error).toHaveBeenCalledWith(
+				expect.objectContaining({ code: 'ERR_ERL_STORE_REUSE' }),
+			)
+		})
+
+		it.each([
+			['modern', () => new MockStore()],
+			['legacy', () => new MockLegacyStore()],
+			['compat', () => new MockBackwardCompatibleStore()],
+		])('should not log an error when each limiter gets its own %s store instance', (name, createStore) => {
+			rateLimit({ store: createStore() })
+			rateLimit({ store: createStore(), logger })
+
+			expect(logger.error).not.toHaveBeenCalled()
+		})
+
+		it('should respect validate.unsharedStore=false for a shared legacy store', () => {
+			const store = new MockLegacyStore()
+
+			rateLimit({ store })
+			rateLimit({ store, logger, validate: { unsharedStore: false } })
+
+			expect(logger.error).not.toHaveBeenCalled()
+		})
+
+		it('should not report double counting for distinct legacy stores with localKeys', async () => {
+			class LocalLegacyStore extends MockLegacyStore {
+				localKeys = true
+			}
+
+			const app = createServer([
+				rateLimit({ store: new LocalLegacyStore(), logger }),
+				rateLimit({ store: new LocalLegacyStore(), logger }),
+			])
+
+			await request(app).get('/').expect(200)
+
+			expect(logger.error).not.toHaveBeenCalled()
+		})
+	})
+
 	describe('async store init', () => {
 		let logger: Logger
 
